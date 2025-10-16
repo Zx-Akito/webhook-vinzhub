@@ -6,7 +6,31 @@ import makeWASocket, {
 import pino from "pino"
 import { Boom } from "@hapi/boom"
 import qrcode from "qrcode-terminal"
-import express from "express"
+import { Client, GatewayIntentBits } from 'discord.js';
+import dotenv from 'dotenv';
+
+// Load environment variables from .env file
+dotenv.config();
+
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN; // token bot
+const CHANNEL_ID = process.env.CHANNEL_ID; // id channel
+const TARGET_WA = process.env.TARGET_WA; // nomor WhatsApp target
+
+// Validasi environment variables
+if (!DISCORD_TOKEN) {
+  console.error('❌ DISCORD_TOKEN tidak ditemukan di file .env');
+  process.exit(1);
+}
+
+if (!CHANNEL_ID) {
+  console.error('❌ CHANNEL_ID tidak ditemukan di file .env');
+  process.exit(1);
+}
+
+if (!TARGET_WA) {
+  console.error('❌ TARGET_WA tidak ditemukan di file .env');
+  process.exit(1);
+}
 
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState("./session")
@@ -37,20 +61,13 @@ async function startBot() {
       if (shouldReconnect) startBot()
     } else if (connection === "open") {
       console.log("✅ Bot berhasil tersambung!")
+      whatsappConnected = true
+      // Jalankan Discord setelah WhatsApp terkoneksi
+      if (!client.isReady()) {
+        console.log("🚀 Memulai Discord client...")
+        client.login(DISCORD_TOKEN)
+      }
     }
-  })
-
-  sock.ev.on("messages.upsert", async (m) => {
-    const msg = m.messages[0]
-    if (!msg.message || msg.key.fromMe) return
-
-    const from = msg.key.remoteJid
-    const text =
-      msg.message.conversation ||
-      msg.message.extendedTextMessage?.text ||
-      ""
-
-    console.log(`[Pesan dari ${from}]: ${text}`)
   })
 
   return sock
@@ -58,151 +75,142 @@ async function startBot() {
 
 // Global variable untuk menyimpan socket instance
 let whatsappSocket = null
+let whatsappConnected = false
 
-// Setup Express server untuk webhook
-const app = express()
-const PORT = process.env.PORT || 4100
+const discordEmbedToWhatsAppText = (embed) => {
 
-// Middleware
-app.use(express.json())
-app.use(express.urlencoded({ extended: true }))
+  // Helper: ubah markdown Discord -> WhatsApp
+  const discordToWhatsApp = text => text?.replace(/\*\*/g, '`') || '';
 
-// Webhook endpoint untuk menerima data dari external services
-app.post('/webhook', async (req, res) => {
-  try {
-    console.log('📥 Webhook received:', JSON.stringify(req.body, null, 2))
-    
-    const { message, phoneNumber, type = 'text' } = req.body
-    
-    if (!message || !phoneNumber) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Message dan phoneNumber diperlukan' 
-      })
-    }
+  const lines = [];
 
-    // Kirim pesan melalui WhatsApp
-    if (whatsappSocket) {
-      const targetJid = phoneNumber.includes('@') ? phoneNumber : `${phoneNumber}@s.whatsapp.net`
-      
-      let messageContent
-      if (type === 'text') {
-        messageContent = { text: message }
-      } else if (type === 'image' && req.body.imageUrl) {
-        messageContent = { 
-          image: { url: req.body.imageUrl },
-          caption: message 
-        }
-      } else if (type === 'document' && req.body.documentUrl) {
-        messageContent = { 
-          document: { url: req.body.documentUrl },
-          mimetype: req.body.mimetype || 'application/octet-stream',
-          fileName: req.body.fileName || 'document'
-        }
-      } else {
-        messageContent = { text: message }
-      }
+  // Judul
+  if (embed.title) lines.push(`> \`\`\`${embed.title}\`\`\``);
 
-      await whatsappSocket.sendMessage(targetJid, messageContent)
-      
-      res.json({ 
-        success: true, 
-        message: 'Pesan berhasil dikirim',
-        target: targetJid
-      })
-    } else {
-      res.status(503).json({ 
-        success: false, 
-        error: 'WhatsApp bot belum terhubung' 
-      })
-    }
-  } catch (error) {
-    console.error('❌ Webhook error:', error)
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    })
+  // Field utama
+  for (const f of embed.fields) {
+    lines.push(`- *${f.name.replace('Name', '').trim()}:* ${discordToWhatsApp(f.value)}`);
   }
-})
 
-// Endpoint untuk mendapatkan status bot
-app.get('/status', (req, res) => {
-  res.json({
-    success: true,
-    status: whatsappSocket ? 'connected' : 'disconnected',
-    timestamp: new Date().toISOString()
-  })
-})
+  // Tambah timestamp
+  if (embed.timestamp) {
+    const date = new Date(embed.timestamp);
+    const localTime = date.toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+    lines.push(`> 🕒 *Caught At:* ${localTime}`);
+  }
 
-// Endpoint untuk mengirim pesan broadcast
-app.post('/broadcast', async (req, res) => {
-  try {
-    const { message, phoneNumbers, type = 'text' } = req.body
-    
-    if (!message || !phoneNumbers || !Array.isArray(phoneNumbers)) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Message dan phoneNumbers (array) diperlukan' 
-      })
-    }
+  return lines.join('\n');
+}
 
-    if (!whatsappSocket) {
-      return res.status(503).json({ 
-        success: false, 
-        error: 'WhatsApp bot belum terhubung' 
-      })
-    }
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent // butuh diaktifkan di Dev Portal jika diperlukan
+  ]
+});
 
-    const results = []
-    
-    for (const phoneNumber of phoneNumbers) {
-      try {
-        const targetJid = phoneNumber.includes('@') ? phoneNumber : `${phoneNumber}@s.whatsapp.net` 
-        await whatsappSocket.sendMessage(targetJid, message)
-        results.push({ phoneNumber: targetJid, status: 'success' })
-      } catch (error) {
-        results.push({ 
-          phoneNumber, 
-          status: 'failed', 
-          error: error.message 
-        })
+client.once('ready', async () => {
+  console.log(`✅ Login sebagai ${client.user.tag}`);
+
+  const channel = await client.channels.fetch(CHANNEL_ID);
+  if (!channel) return console.log('Channel tidak ditemukan.');
+
+  // Ambil pesan terbaru saja
+  const messages = await channel.messages.fetch({ limit: 1 });
+
+  const data = [];
+  for (const msg of messages.values()) {
+    if (msg.embeds.length > 0) {
+      for (const embed of msg.embeds) {
+        data.push({
+          author: msg.author.username,
+          title: embed.title,
+          description: embed.description,
+          fields: embed.fields.map(f => ({ name: f.name, value: f.value })),
+          timestamp: msg.createdAt,
+        });
       }
     }
-
-    res.json({ 
-      success: true, 
-      message: 'Broadcast selesai',
-      results 
-    })
-  } catch (error) {
-    console.error('❌ Broadcast error:', error)
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    })
   }
-})
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime()
-  })
-})
+  console.log(`📦 Ditemukan ${data.length} pesan terbaru dengan embed.`);
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Webhook server berjalan di port ${PORT}`)
-  console.log(`📡 Webhook URL: http://localhost:${PORT}/webhook`)
-  console.log(`📊 Status URL: http://localhost:${PORT}/status`)
-  console.log(`📢 Broadcast URL: http://localhost:${PORT}/broadcast`)
-})
+  // Kirim data ke WhatsApp jika ada pesan dan WhatsApp terkoneksi
+  if (data.length > 0 && whatsappSocket && whatsappConnected) {
+    try {
+      const latestData = data[0]; // Ambil hanya data terbaru (index 0)
+      const message = discordEmbedToWhatsAppText(latestData);
+      
+      // Gunakan nomor WhatsApp target dari environment variable
+      const targetJid = `${TARGET_WA}@s.whatsapp.net`;
+      
+      await whatsappSocket.sendMessage(targetJid, { text: message });
+      console.log('✅ Data terbaru berhasil dikirim ke WhatsApp.');
+    } catch (err) {
+      console.error('❌ Gagal kirim ke WhatsApp:', err.message);
+    }
+  }
+
+});
+
+client.on('messageCreate', async message => {
+  // Skip pesan dari bot sendiri
+  if (message.author.id === client.user.id) return;
+  
+  if (message.channel.id !== CHANNEL_ID) return;
+  if (message.embeds.length === 0) return;
+
+  const embed = message.embeds[0];
+  const payload = {
+    author: message.author.username,
+    title: embed.title,
+    fields: embed.fields.map(f => ({ name: f.name, value: f.value })),
+    timestamp: message.createdAt,
+  };
+
+  console.log(`🐟 Pesan baru diterima dari ${message.author.username}: ${embed.title}`);
+
+  // Kirim data ke WhatsApp jika WhatsApp terkoneksi
+  if (whatsappSocket && whatsappConnected) {
+    try {
+      const messageText = discordEmbedToWhatsAppText(payload);
+      
+      const targetJid = `${TARGET_WA}@s.whatsapp.net`;
+      
+      await whatsappSocket.sendMessage(targetJid, { text: messageText });
+      console.log('✅ Pesan baru berhasil dikirim ke WhatsApp.');
+    } catch (err) {
+      console.error('❌ Gagal kirim ke WhatsApp:', err.message);
+    }
+  } else {
+    console.log('⚠️ WhatsApp belum terkoneksi, pesan tidak dikirim.');
+  }
+});
+
+// Event handler untuk menangani error dan reconnection
+client.on('error', error => {
+  console.error('❌ Discord client error:', error);
+});
+
+client.on('disconnect', () => {
+  console.log('⚠️ Discord client terputus, mencoba reconnect...');
+});
+
+client.on('reconnecting', () => {
+  console.log('🔄 Discord client reconnecting...');
+});
 
 // Start WhatsApp bot
 async function initializeBot() {
-  whatsappSocket = await startBot()
+  console.log("🔄 Memulai WhatsApp bot...");
+  whatsappSocket = await startBot();
+
+  if (!client.isReady()) {
+    console.log("🚀 Memulai Discord client...");
+    client.login(DISCORD_TOKEN);
+  }
 }
+
 
 initializeBot()

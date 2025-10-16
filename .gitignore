@@ -1,3 +1,4 @@
 node_modules
 session
 auth_info
+.env
