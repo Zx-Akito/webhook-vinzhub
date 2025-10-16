@@ -61,7 +61,7 @@ let whatsappSocket = null
 
 // Setup Express server untuk webhook
 const app = express()
-const PORT = process.env.PORT || 3000
+const PORT = process.env.PORT || 4100
 
 // Middleware
 app.use(express.json())
