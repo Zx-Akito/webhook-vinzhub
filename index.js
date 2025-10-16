@@ -106,6 +106,29 @@ const discordEmbedToWhatsAppText = (embed) => {
   return lines.join('\n');
 }
 
+// Fungsi untuk mengecek apakah pesan harus dikirim berdasarkan rarity
+const shouldSendMessage = (embed) => {
+  // Cari field rarity dalam embed
+  const rarityField = embed.fields.find(field => 
+    field.name.toLowerCase().includes('rarity') || 
+    field.name.toLowerCase().includes('rare')
+  );
+  
+  if (!rarityField) {
+    // Jika tidak ada field rarity, kirim pesan (default behavior)
+    return true;
+  }
+  
+  const rarity = rarityField.value.toLowerCase().trim();
+  
+  // Jangan kirim jika rarity adalah "uncommon" atau "rare"
+  if (rarity === 'uncommon' || rarity === 'rare') {
+    console.log(`🚫 Pesan tidak dikirim karena rarity: ${rarity}`);
+    return false;
+  }
+  return true;
+}
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -155,6 +178,13 @@ client.once('ready', async () => {
   if (data.length > 0 && whatsappSocket && whatsappConnected) {
     try {
       const latestData = data[0]; // Ambil hanya data terbaru (index 0)
+      
+      // Cek apakah pesan harus dikirim berdasarkan rarity
+      if (!shouldSendMessage(latestData)) {
+        console.log('🚫 Data terbaru tidak dikirim karena filter rarity.');
+        return;
+      }
+      
       const message = discordEmbedToWhatsAppText(latestData);
       
       // Gunakan nomor WhatsApp target dari environment variable
@@ -185,6 +215,11 @@ client.on('messageCreate', async message => {
   };
 
   console.log(`🐟 Pesan baru diterima dari ${message.author.username}: ${embed.title}`);
+
+  // Cek apakah pesan harus dikirim berdasarkan rarity
+  if (!shouldSendMessage(payload)) {
+    return; // Keluar dari fungsi jika tidak boleh dikirim
+  }
 
   // Kirim data ke WhatsApp jika WhatsApp terkoneksi
   if (whatsappSocket && whatsappConnected) {
